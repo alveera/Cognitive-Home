@@ -1,0 +1,147 @@
+;*******************************************************************************
+;   Description: Use inbuilt temperature sensor of ADC10 and external LDR to 
+;   detect external temperature and light intensity. Also, use a port interrupt
+;   (motin sensor) to detect the presence of a person in the room. Once motion 
+;   is sensed, a light, fan and an AC are switched on according to the 
+;   Temperature sensor and LDR outputs.
+;
+;                MSP430G2x33/G2x53
+;             -----------------
+;         /|\|              LIG|--->
+;          | |               AC|--->
+;          --|RST           FAN|--->
+;            |                 |
+;        >---|A10/Temp         |
+;        >---|P1.0/A0          |
+;        >---|P1.3/Int         |
+
+
+;   Aditi Kumari
+;   Alveera Gill
+;   Akhhiila Gurram
+;   MIT, MANIPAL
+;   June 2016
+;   Gill Instruments (one month internship) 
+;   Built with IAR Embedded Workbench Version: 5.10
+;*******************************************************************************
+#include <msp430.h>
+;------------------------------------------------------------------------------;
+            ORG     0200H                                                       ; Define stack segment
+TEMP        DW      00H
+            ORG     0214H    
+LDR         DW      00H      
+PIR         DW      00H
+
+LIG         EQU     BIT4
+FAN         EQU     BIT5
+AC          EQU     BIT6
+
+            ORG     0F800h                                                      ; Program Reset
+;------------------------------------------------------------------------------;
+RESET       mov.w   #0280h,SP                                                   ; Initialize stackpointer
+
+;------------------------------------------------------------------------------;
+StopWDT     
+;------------------------------------------------------------------------------;
+            mov.w   #WDT_ADLY_1000,&WDTCTL     
+            bis.b   #WDTIE,&IE1                                                 ; Enable WDT interrupt
+            MOV.B   #10,R10
+            CLR     PIR
+            BIS.B   #BIT4+BIT5+BIT6+BIT0,&P1DIR
+            CLR.B   &P1OUT
+;------------------------------------------------------------------------------;           
+SetupP1     
+;------------------------------------------------------------------------------;
+            mov.b   #BIT3,&P1OUT                                                ; P1.3 set, else reset
+            bis.b   #BIT3,&P1REN                                                ; P1.3 pullup
+            bis.b   #BIT3,&P1IE                                                 ; P1.3 Interrupt enabled
+            bis.b   #BIT3,&P1IES                                                ; P1.3 hi/low edge
+            bic.b   #BIT3,&P1IFG                                                ; P1.3 IFG Cleared
+            
+;------------------------------------------------------------------------------;
+SetupADC10  
+;------------------------------------------------------------------------------;
+            mov.w   #INCH_10+ADC10DIV_3+CONSEQ_3,&ADC10CTL1                     ; A10/A0, repeat multi channel
+            mov.w   #SREF_1+REFON+ADC10SHT_3+MSC+ADC10ON+ADC10IE,&ADC10CTL0     
+            
+            bis.b   #03h,&ADC10AE0                                              ; P1.0,1 ADC option select
+            mov.b   #11,&ADC10DTC1                                              ; 32 conversions
+;------------------------------------------------------------------------------;                                            ;
+Mainloop
+;------------------------------------------------------------------------------;
+busy_test   bit     #BUSY,&ADC10CTL1                                            ; ADC10 core inactive?
+            jnz     busy_test               
+            mov.w   #0200h,&ADC10SA                                             ; Data buffer start
+            bis.w   #ENC+ADC10SC,&ADC10CTL0                                     ; Start sampling
+            bis.w   #CPUOFF+GIE,SR                                              ; CPU off, Enable interrupts
+            nop                                                                 ; set breakpoint here to read ADC
+            TST   PIR
+            JZ    Mainloop
+          
+            cmp     #010H,LDR
+            JLO     LIG_ON
+;------------------------------;
+LIG_OFF     bic.b  #LIG,&P1OUT 
+            jmp    AC_CHK
+
+LIG_ON      bis.b  #BIT4,&P1OUT
+;------------------------------;          
+AC_CHK      cmp    #02EBH,TEMP
+            JLO     FAN_CHK     
+
+AC_ON       bis.b  #BIT6,&P1OUT
+            bic.b  #FAN,&P1OUT 
+            jmp    Mainloop
+;------------------------------;
+FAN_CHK     cmp     #02E5H,TEMP
+            JLO     FAN_OFF   
+
+FAN_ON      bis.b  #BIT5,&P1OUT
+            bic.b  #AC,&P1OUT
+            jmp    Mainloop
+
+FAN_OFF     bic.b  #FAN,&P1OUT 
+            bic.b  #AC,&P1OUT
+            jmp    Mainloop
+            
+;------------------------------------------------------------------------------;
+ADC10_ISR;
+;------------------------------------------------------------------------------;
+            bic.w   #ENC,&ADC10CTL0                                             ; ADC10 disabled
+            bic.w   #LPM0,0(SP)                                                 ; Exit LPM0 on reti
+            reti                            ;
+;------------------------------------------------------------------------------;
+WDT_ISR                                                                         ;    WDT Interrupt service routine					
+;------------------------------------------------------------------------------;
+               DEC   R10
+               JNZ   EXT
+               CLR.B PIR
+               bic.b  #FAN,&P1OUT 
+               bic.b  #AC,&P1OUT
+               bic.b  #LIG,&P1OUT 
+               MOV.B #10,R10
+EXT            RETI
+;------------------------------------------------------------------------------;
+P1_ISR                                                                          ; Toggle P1.0 Output
+;------------------------------------------------------------------------------;
+            BIS.B   #01H,&PIR                                                   ; P1.0 = toggle
+            MOV.B   #10,R10
+            bic.b   #BIT3,&P1IFG                                                ; P1.4 IFG Cleared
+            reti                                                                ; Return from ISR
+;------------------------------------------------------------------------------;
+;           Interrupt Vectors
+;------------------------------------------------------------------------------;
+            ORG     0FFEAH                                                      ; ADC10 Vector
+            DW      ADC10_ISR
+     
+            ORG     0FFFEh                                                      ; MSP430 RESET Vector
+            DW      RESET                    
+           
+            ORG     0FFF4h                                                      ; WDT Vector
+            DW      WDT_ISR                  
+         
+            ORG     0FFE4h                                                      ; P1.x Vector
+            DW      P1_ISR 
+            
+            END
+;------------------------------------------------------------------------------;
